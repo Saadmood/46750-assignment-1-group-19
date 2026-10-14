@@ -58,6 +58,7 @@ input figure to `results/Q1_caseA/`. Until you complete the model (see Section 3
 
 ```
 main.py                  Entry point: load data -> build model -> solve -> save results and figures
+Q2_C_&_Q_3_D.ipynb        Jupyter Notebook to reproduce the simulations, tables, and figures for Questions 2C and 3D
 src/
   data_loader.py         load_question("Q1_caseA") -> InputData (all parameters, with units)
   model.py               FlexibleConsumerModel: build() / solve() -> Results (primal + dual values)
@@ -89,6 +90,31 @@ python main.py --question Q1_caseA              # base case
 python main.py --question Q1_caseA --scenarios  # + example sensitivity scenarios
 python main.py --show                           # open the figures in a window
 ```
+
+**Reproducing Question 2(c) and Question 3(d) (Quadratic Disutility & Minimum Daily Energy)**
+
+All models, parameter sweeps, and plots for Questions 2(c) and 3(d) are implemented in `src/` and can be executed directly from the Jupyter Notebook (`experiments.ipynb`) or any Python script:
+
+- **`QuadraticConsumerModel` (`src/model.py`)**: Subclass of `FlexibleConsumerModel` implementing the strictly convex quadratic disutility objective for Question 2(c).iii (`Q2_quadratic`) and automatically including the minimum daily energy constraint ($\sum_{t} L_t \ge E^{\min}$) when `min_daily_energy_kWh` is present in the dataset (`Q3`, Question 3(d)).
+- **`with_cQ()` and `run_cQ_sweep()` (`src/scenarios.py`)**: Helper functions that vary the quadratic disutility coefficient $c^Q$ [DKK/kWh$^2$] and return a summary DataFrame with daily procurement cost, total disutility, daily energy consumed, total absolute deviation, and number of binding load-bound hours (Question 2(c).iv).
+- **`plot_load_vs_reference()` (`src/plotting.py`)**: Plots the optimal hourly consumption schedule $L_t^*$ against the reference profile $l_t^{\text{ref}}$ and hourly load bounds, and exports high-resolution figures to `results/`.
+
+```python
+from src.data_loader import load_question
+from src.model import QuadraticConsumerModel
+from src.scenarios import run_cQ_sweep
+from src.plotting import plot_load_vs_reference
+
+# Question 2(c): Base case & c^Q parameter sweep
+data_q2c = load_question("Q2_quadratic")
+res_q2c = QuadraticConsumerModel(data_q2c).build().solve()
+plot_load_vs_reference(res_q2c, data_q2c, save_path="results/Q2_quadratic/load_vs_reference.png")
+df_sweep = run_cQ_sweep(data_q2c)
+
+# Question 3(d): Minimum daily energy requirement
+data_q3 = load_question("Q3")
+res_q3 = QuadraticConsumerModel(data_q3).build().solve()
+plot_load_vs_reference(res_q3, data_q3, save_path="results/Q3/load_vs_reference.png")
 
 **Use it from a notebook or your own script** (run from the repository root):
 ```python
