@@ -91,14 +91,6 @@ python main.py --question Q1_caseA --scenarios  # + example sensitivity scenario
 python main.py --show                           # open the figures in a window
 ```
 
-**Reproducing Question 2(c) and Question 3(d) (Quadratic Disutility & Minimum Daily Energy)**
-
-All models, parameter sweeps, and plots for Questions 2(c) and 3(d) are implemented in `src/` and can be executed directly from the Jupyter Notebook (`experiments.ipynb`) or any Python script:
-
-- **`QuadraticConsumerModel` (`src/model.py`)**: Subclass of `FlexibleConsumerModel` implementing the strictly convex quadratic disutility objective for Question 2(c).iii (`Q2_quadratic`) and automatically including the minimum daily energy constraint ($\sum_{t} L_t \ge E^{\min}$) when `min_daily_energy_kWh` is present in the dataset (`Q3`, Question 3(d)).
-- **`with_cQ()` and `run_cQ_sweep()` (`src/scenarios.py`)**: Helper functions that vary the quadratic disutility coefficient $c^Q$ [DKK/kWh$^2$] and return a summary DataFrame with daily procurement cost, total disutility, daily energy consumed, total absolute deviation, and number of binding load-bound hours (Question 2(c).iv).
-- **`plot_load_vs_reference()` (`src/plotting.py`)**: Plots the optimal hourly consumption schedule $L_t^*$ against the reference profile $l_t^{\text{ref}}$ and hourly load bounds, and exports high-resolution figures to `results/`.
-
 ```python
 from src.data_loader import load_question
 from src.model import QuadraticConsumerModel
@@ -162,6 +154,14 @@ Everything downstream (solving, extraction of primal and dual values, saving, pl
   `model.py` sets it and reads the right attribute for you.
   Gurobi's sign convention is d(objective)/d(right-hand side): for a "<=" constraint in a minimization the value
   is non-positive; state the convention you use when you report multipliers.
+
+**Reproducing Question 2(c) and Question 3(d) (Quadratic Disutility & Minimum Daily Energy)**
+
+All models, parameter sweeps, and plots for Questions 2(c) and 3(d) are implemented in `src/` and can be executed directly from the Jupyter Notebook (`experiments.ipynb`) or any Python script:
+
+- **`QuadraticConsumerModel` (`src/model.py`)**: Subclass of `FlexibleConsumerModel` implementing the strictly convex quadratic disutility objective for Question 2(c).iii (`Q2_quadratic`) and automatically including the minimum daily energy constraint ($\sum_{t} L_t \ge E^{\min}$) when `min_daily_energy_kWh` is present in the dataset (`Q3`, Question 3(d)).
+- **`with_cQ()` and `run_cQ_sweep()` (`src/scenarios.py`)**: Helper functions that vary the quadratic disutility coefficient $c^Q$ [DKK/kWh$^2$] and return a summary DataFrame with daily procurement cost, total disutility, daily energy consumed, total absolute deviation, and number of binding load-bound hours (Question 2(c).iv).
+- **`plot_load_vs_reference()` (`src/plotting.py`)**: Plots the optimal hourly consumption schedule $L_t^*$ against the reference profile $l_t^{\text{ref}}$ and hourly load bounds, and exports high-resolution figures to `results/`.
 
 ## 4. Input data
 
