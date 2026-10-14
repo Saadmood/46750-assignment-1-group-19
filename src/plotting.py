@@ -107,3 +107,37 @@ def plot_scenario_comparison(
     ax.set(ylabel=ylabel, title=f"Scenario comparison - {metric}")
     ax.tick_params(axis="x", rotation=20)
     return _finish(fig, save_to)
+
+def plot_load_vs_reference(results, data, save_path=None):
+    """
+    Plot optimal hourly load schedule against the reference load profile.
+
+    Inputs:
+        results (Results): Solved model results containing hourly DataFrame.
+        data (InputData): Input parameters containing reference_load and bounds [kWh/h].
+        save_path (str or Path, optional): File path to save the figure under results/.
+    Outputs:
+        matplotlib.figure.Figure: Generated figure object.
+    """
+    fig, ax = plt.subplots(figsize=(10, 4.5))
+    hours = data.hours
+
+    ax.step(hours, data.reference_load, where="mid", label=r"Reference profile ($l_t^{ref}$)",
+            linestyle="--", color="black", linewidth=1.8)
+    ax.step(hours, results.hourly["load"], where="mid", label=r"Optimal load ($l_t^*$)",
+            color="tab:blue", linewidth=2.2)
+    ax.axhline(data.load_min_kWh, color="tab:red", linestyle=":", alpha=0.6, label=r"$L^{min} / L^{max}$")
+    ax.axhline(data.load_max_kWh, color="tab:red", linestyle=":", alpha=0.6)
+
+    ax.set_xlabel("Hour of the day [h]")
+    ax.set_ylabel("Hourly consumption [kWh/h]")
+    ax.set_title(f"{data.question} — Optimal Load Schedule vs. Reference Profile")
+    ax.set_xticks(hours)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+
+    return fig

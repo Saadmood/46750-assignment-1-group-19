@@ -177,6 +177,97 @@ class FlexibleConsumerModel:
             meta={"scalar_variables": scalars},
         )
 
+class QuadraticConsumerModel(FlexibleConsumerModel):
+    """
+    Optimization model for Question 2(c) (Quadratic disutility)
+    and Question 3(d) (Minimum daily energy requirement).
+    
+    Inputs:
+        data (InputData): Consumer, appliance, and grid parameters loaded via load_question().
+    Outputs:
+        self: Built Gurobi model with variables in self.var and constraints in self.con.
+    """
+    def build(self):
+        # Retrieve or initialize the Gurobi model instance expected by solve()
+        if hasattr(self, "m") and isinstance(self.m, gp.Model):
+            m = self.m
+        elif hasattr(self, "model") and isinstance(self.model, gp.Model):
+            m = self.model
+        else:
+            m = gp.Model(self.data.question)
+            m.Params.OutputFlag = 0
+            m.Params.QCPDual = 1
+            self.m = m
+            self.model = m
+
+        d = self.data
+        T = range(len(d.hours))  # 24 hours: 0..23
+
+        # Effective import and export prices [DKK/kWh]
+        p_imp = d.energy_price + d.import_tariff
+        p_exp = d.energy_price - d.export_tariff
+
+        # 1. Decision variables (free variables; bounds added as explicit constraints for duals Pi)
+        self.var["import"] = m.addVars(T, lb=-GRB.INFINITY, name="import")
+        self.var["export"] = m.addVars(T, lb=-GRB.INFINITY, name="export")
+        self.var["pv"]     = m.addVars(T, lb=-GRB.INFINITY, name="pv")
+        self.var["load"]   = m.addVars(T, lb=-GRB.INFINITY, name="load")
+
+        l     = self.var["load"]
+        pv    = self.var["pv"]
+        g_imp = self.var["import"]
+        g_exp = self.var["export"]
+
+        # 2. Objective Function: Minimize (Daily Procurement Cost + Total Quadratic Disutility) [DKK]
+        procurement_cost = gp.quicksum(
+            p_imp[t] * g_imp[t] - p_exp[t] * g_exp[t] + d.pv_marginal_cost * pv[t]
+            for t in T
+        )
+        disutility = gp.quicksum(
+            d.quadratic_disutility * (l[t] - d.reference_load[t]) * (l[t] - d.reference_load[t])
+            for t in T
+        )
+        m.setObjective(procurement_cost + disutility, GRB.MINIMIZE)
+
+        # 3. Explicit Constraints (stored in self.con for automatic dual extraction)
+        # Hourly power balance: load + export - pv - import == 0 [kWh/h]
+        self.con["balance"] = m.addConstrs(
+            (l[t] + g_exp[t] - pv[t] - g_imp[t] == 0 for t in T), name="balance"
+        )
+
+        # Hourly load bounds: load_min_kWh <= l_t <= load_max_kWh [kWh/h]
+        self.con["load_min"] = m.addConstrs(
+            (l[t] >= d.load_min_kWh for t in T), name="load_min"
+        )
+        self.con["load_max"] = m.addConstrs(
+            (l[t] <= d.load_max_kWh for t in T), name="load_max"
+        )
+
+        # Hourly PV production bounds: 0 <= pv_t <= pv_available_t [kWh/h]
+        self.con["pv_min"] = m.addConstrs(
+            (pv[t] >= 0.0 for t in T), name="pv_min"
+        )
+        self.con["pv_max"] = m.addConstrs(
+            (pv[t] <= d.pv_available[t] for t in T), name="pv_max"
+        )
+
+        # Non-negativity of grid import and export [kWh/h]
+        self.con["import_min"] = m.addConstrs(
+            (g_imp[t] >= 0.0 for t in T), name="import_min"
+        )
+        self.con["export_min"] = m.addConstrs(
+            (g_exp[t] >= 0.0 for t in T), name="export_min"
+        )
+
+        # 4. Extension for Question 3(d): Minimum daily energy consumption requirement [kWh]
+        if d.min_daily_energy_kWh is not None:
+            self.con["min_daily_energy"] = m.addConstr(
+                gp.quicksum(l[t] for t in T) >= d.min_daily_energy_kWh,
+                name="min_daily_energy"
+            )
+
+        m.update()
+        return self
 
 _STATUS = {
     GRB.OPTIMAL: "OPTIMAL", GRB.INFEASIBLE: "INFEASIBLE", GRB.UNBOUNDED: "UNBOUNDED",
@@ -187,3 +278,4 @@ _STATUS = {
 
 def _status_name(code: int) -> str:
     return _STATUS.get(code, f"STATUS_{code}")
+
