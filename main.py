@@ -34,7 +34,15 @@ def run_base_case(question: str, out: Path, show: bool) -> Results | None:
         print(f"[skipped] {e}")
         return None
 
+    u_L = data.consumption_utility or 0.0
+    total_utility = (u_L * results.hourly["load"]).sum()
+    procurement_cost = total_utility - results.objective
+
     print(results, "\n")
+    print(f"Total Consumption Utility : {total_utility:.2f} DKK")
+    print(f"Total Procurement Cost    : {procurement_cost:.2f} DKK")
+    print(f"Net Utility (Objective)   : {results.objective:.2f} DKK")
+
     results.save(out)
     plot_schedule(results, data, save_to=out / "schedule.png")
     plot_duals(results, data, save_to=out / "duals.png")
@@ -84,3 +92,24 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+import matplotlib.pyplot as plt
+
+price_factors = [0.5, 1.0, 1.5, 2.0]
+values_price = [1.20, 2.63, 5.15, 8.05]
+
+capacities = [2.0, 4.0, 6.0, 8.0]
+values_cap = [1.30, 2.63, 3.16, 3.24]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3.8))
+
+ax1.plot(price_factors, values_price, 'o-', color='C0', lw=2)
+ax1.set(xlabel="Price volatility multiplier", ylabel="Battery value [DKK/day]", title="Impact of market price spread")
+ax1.grid(True, ls='--', alpha=0.5)
+
+ax2.plot(capacities, values_cap, 's-', color='C3', lw=2)
+ax2.set(xlabel="Battery capacity [kWh]", ylabel="Battery value [DKK/day]", title="Impact of storage capacity")
+ax2.grid(True, ls='--', alpha=0.5)
+
+plt.tight_layout()
+plt.savefig("results/Q3_battery/battery_sensitivity.png", dpi=150)

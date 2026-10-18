@@ -69,6 +69,152 @@ def _dual(c) -> float:
     return c.QCPi if isinstance(c, gp.QConstr) else c.Pi
 
 
+
+class FlexibleConsumerModel: #Question 1 e & f
+    """Consumption problem of one consumer over a 24-hour horizon (Question 1); extend it for Questions 2 and 3."""
+
+    def __init__(self, data: InputData, name: str = "flexible_consumer", verbose: bool = False):
+        self.data = data
+        self.T = range(data.n_hours)
+        self.m = gp.Model(name)
+        self.m.Params.OutputFlag = 1 if verbose else 0
+        self.m.Params.QCPDual = 1          # only relevant if you add a quadratic constraint (none is needed in Assignment 1)
+        self.var: dict[str, gp.tupledict | gp.Var] = {}   # decision variables by name
+        self.con: dict[str, gp.tupledict | gp.Constr] = {}  # constraints by name (duals read from here)
+
+    # ------------------------------------------------------------------ 2. build
+    def build(self) -> "FlexibleConsumerModel":
+        """Declare decision variables, objective and constraints.
+
+        TODO (Question 1): complete this method with the variables, objective and constraints
+        of the problem you formulated in Question 1. Keep the naming pattern below so
+        that ``solve()`` can return the primal and dual values automatically.
+        """
+        d, m, T = self.data, self.m, self.T
+        p_imp = d.energy_price + d.import_tariff
+        p_exp = d.energy_price - d.export_tariff
+
+        # --- Decision variables --------------------------------------------------------
+        # TODO: identify and declare the decision variables of your formulation.
+        # Store every variable family in self.var["<name>"]: solve() then returns its hourly
+        # values automatically as a column of results.hourly.
+        # Pattern for hourly variables (one per hour):
+        #   self.var["<name>"] = m.addVars(T, lb=-GRB.INFINITY, vtype=GRB.CONTINUOUS, name="<name>")
+        # Pattern for a single (daily) variable:
+        #   self.var["<name>"] = m.addVar(lb=-GRB.INFINITY, vtype=GRB.CONTINUOUS, name="<name>")
+        # Notes:
+        # * gurobipy indexes the names automatically: name="<name>" in addVars(T, ...) creates
+        #   <name>[0], <name>[1], ..., <name>[23] - no need to build per-hour names yourself.
+        # * vtype: the same format takes GRB.BINARY or GRB.INTEGER if you ever need them (the
+        #   problem then becomes a MILP and dual values are no longer defined; solve() skips them).
+        # * lb defaults to 0 in gurobipy: a free variable needs an explicit lb=-GRB.INFINITY, and
+        #   a bound you want a dual for must be an explicit constraint, not lb=/ub= (see the README).
+        # * naming the families "import", "export", "load", "pv" makes the standard plots of
+        #   src/plotting.py work out of the box.
+        load = m.addVars(T, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="load")
+        pv = m.addVars(T, lb=0.0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="pv")
+        p_import = m.addVars(T, lb=0.0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="import")
+        p_export = m.addVars(T, lb=0.0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="export")
+
+        self.var["load"] = load
+        self.var["pv"] = pv
+        self.var["import"] = p_import
+        self.var["export"] = p_export
+
+        # --- Objective ---------------------------------------------------------------
+        # TODO: express the objective function and its direction (GRB.MINIMIZE or GRB.MAXIMIZE):
+        #   m.setObjective(gp.quicksum(<expression in t> for t in T), <direction>)
+        # The input-data attributes (with units) are documented in src/data_loader.py (InputData).
+        u_L = d.consumption_utility if d.consumption_utility is not None else 0.0
+        c_pv = d.pv_marginal_cost
+
+        obj_expr = gp.quicksum(
+            u_L * load[t]
+            - c_pv * pv[t]
+            - p_imp[t] * p_import[t]
+            + p_exp[t] * p_export[t]
+            for t in T
+        )
+        m.setObjective(obj_expr, GRB.MAXIMIZE)
+
+        # --- Constraints -------------------------------------------------------------
+        # TODO: add the constraints of your formulation.
+        # Pattern for hourly constraints (one per hour, duals returned as a 24-vector; names are
+        # indexed automatically, like for the variables):
+        #   self.con["<name>"] = m.addConstrs(
+        #       (<lhs expression> - <rhs expression> <= 0 for t in T), name="<name>")
+        # Pattern for a single constraint (dual returned as a scalar):
+        #   self.con["<name>"] = m.addConstr(<lhs expression> - <rhs expression> <= 0, name="<name>")
+        self.con["balance"] = m.addConstrs(
+            (pv[t] + p_import[t] - load[t] - p_export[t] == 0 for t in T),
+            name="balance"
+        )
+        self.con["load_min"] = m.addConstrs(
+            (load[t] >= d.load_min_kWh for t in T),
+            name="load_min"
+        )
+        self.con["load_max"] = m.addConstrs(
+            (load[t] <= d.load_max_kWh for t in T),
+            name="load_max"
+        )
+        self.con["pv_max"] = m.addConstrs(
+            (pv[t] <= d.pv_available[t] for t in T),
+            name="pv_max"
+        )
+        m.update()
+        return self
+
+    # ------------------------------------------------------------------ 3. solve
+    def solve(self) -> Results:
+        """Optimise and return primal values, objective and dual values."""
+        m = self.m
+        m.update()
+        if m.NumConstrs == 0 and m.NumQConstrs == 0:
+            raise NotImplementedError(
+                "The model has no constraints: complete FlexibleConsumerModel.build() in src/model.py first."
+            )
+        m.optimize()
+        status = _status_name(m.Status)
+        if m.Status != GRB.OPTIMAL:
+            raise RuntimeError(f"Optimisation ended with status {status}. Check the model (m.computeIIS() helps for infeasibility).")
+        return self._extract_results(status)
+
+    # --------------------------------------------------------------- extraction
+    def _extract_results(self, status: str) -> Results:
+        d, T = self.data, list(self.T)
+        hourly = pd.DataFrame(index=pd.Index(T, name="hour"))
+        hourly["price"] = d.energy_price
+        hourly["pv_available"] = d.pv_available
+        if d.reference_load is not None:
+            hourly["reference_load"] = d.reference_load
+
+        # Primal values: every hourly variable family in self.var becomes a column
+        for name, v in self.var.items():
+            if isinstance(v, gp.tupledict):
+                hourly[name] = [v[t].X for t in T]
+        scalars = {name: v.X for name, v in self.var.items() if isinstance(v, gp.Var)}
+
+        # Dual values: every constraint family in self.con becomes a 'dual_<name>' column or scalar
+        duals: dict[str, float] = {}
+        for name, c in self.con.items():
+            try:
+                if isinstance(c, gp.tupledict):
+                    hourly[f"dual_{name}"] = [_dual(c[t]) for t in T]
+                else:
+                    duals[name] = _dual(c)
+            except (AttributeError, gp.GurobiError):
+                # No duals available (e.g. model with integer variables)
+                pass
+
+        return Results(
+            question=d.question,
+            status=status,
+            objective=self.m.ObjVal,
+            hourly=hourly,
+            duals=duals,
+            meta={"scalar_variables": scalars},
+        )
+
 class FlexibleConsumerModel:
     """Consumption problem of one consumer over a 24-hour horizon (Question 1); extend it for Questions 2 and 3."""
 
@@ -279,3 +425,171 @@ _STATUS = {
 def _status_name(code: int) -> str:
     return _STATUS.get(code, f"STATUS_{code}")
 
+class FlexibleConsumerModel:  #Question 3g
+    def __init__(self, data: InputData, name: str = "flexible_consumer", verbose: bool = False):
+            self.data = data
+            self.T = range(data.n_hours)
+            self.m = gp.Model(name)
+            self.m.Params.OutputFlag = 1 if verbose else 0
+            self.m.Params.QCPDual = 1          # only relevant if you add a quadratic constraint (none is needed in Assignment 1)
+            self.var: dict[str, gp.tupledict | gp.Var] = {}   # decision variables by name
+            self.con: dict[str, gp.tupledict | gp.Constr] = {}  # constraints by name (duals read from here)
+    
+    def build(self) -> "FlexibleConsumerModel":
+        """Declare decision variables, objective function, and constraints for Q1, Q2, and Q3."""
+        d, m, T = self.data, self.m, self.T
+
+        # --- Effective import and export electricity prices ---
+        p_imp = d.energy_price + d.import_tariff
+        p_exp = d.energy_price - d.export_tariff
+
+        # --- 1. Decision Variables ---
+        # Baseline continuous operational variables
+        load = m.addVars(T, lb=-GRB.INFINITY, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="load")
+        pv = m.addVars(T, lb=0.0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="pv")
+        p_import = m.addVars(T, lb=0.0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="import")
+        p_export = m.addVars(T, lb=0.0, ub=GRB.INFINITY, vtype=GRB.CONTINUOUS, name="export")
+
+        self.var["load"] = load
+        self.var["pv"] = pv
+        self.var["import"] = p_import
+        self.var["export"] = p_export
+
+        # Battery storage variables (Question 3.g: active only when battery parameters exist)
+        has_battery = d.battery_capacity_kWh is not None
+        if has_battery:
+            p_ch = m.addVars(T, lb=0.0, ub=d.battery_max_charge_kW, vtype=GRB.CONTINUOUS, name="charge")
+            p_dis = m.addVars(T, lb=0.0, ub=d.battery_max_discharge_kW, vtype=GRB.CONTINUOUS, name="discharge")
+            soc = m.addVars(T, lb=0.0, ub=d.battery_capacity_kWh, vtype=GRB.CONTINUOUS, name="soc")
+            self.var["charge"] = p_ch
+            self.var["discharge"] = p_dis
+            self.var["soc"] = soc
+
+        # --- 2. Objective Function ---
+        # Net energy procurement and production cost
+        cost_procurement = gp.quicksum(
+            d.pv_marginal_cost * pv[t] + p_imp[t] * p_import[t] - p_exp[t] * p_export[t]
+            for t in T
+        )
+
+        if d.consumption_utility is not None:
+            # Question 1: Maximize net utility (surplus) = consumption utility - procurement cost
+            utility_term = gp.quicksum(d.consumption_utility * load[t] for t in T)
+            m.setObjective(utility_term - cost_procurement, GRB.MAXIMIZE)
+        else:
+            # Questions 2 & 3: Minimize total perceived cost = disutility + procurement cost
+            disutility = 0
+            if d.quadratic_disutility is not None and d.reference_load is not None:
+                c_Q = d.quadratic_disutility
+                disutility = gp.quicksum(
+                    c_Q * (load[t] - d.reference_load[t]) * (load[t] - d.reference_load[t])
+                    for t in T
+                )
+            elif d.linear_disutility is not None and d.reference_load is not None:
+                # Linear absolute deviation model using auxiliary variables
+                c_L = d.linear_disutility
+                dev_pos = m.addVars(T, lb=0.0, vtype=GRB.CONTINUOUS, name="dev_pos")
+                dev_neg = m.addVars(T, lb=0.0, vtype=GRB.CONTINUOUS, name="dev_neg")
+                m.addConstrs((load[t] - d.reference_load[t] == dev_pos[t] - dev_neg[t] for t in T), name="dev_split")
+                disutility = gp.quicksum(c_L * (dev_pos[t] + dev_neg[t]) for t in T)
+
+            m.setObjective(cost_procurement + disutility, GRB.MINIMIZE)
+
+        # --- 3. Constraints ---
+        # 3.1 Local nodal power balance
+        if has_battery:
+            self.con["balance"] = m.addConstrs(
+                (pv[t] + p_import[t] + p_dis[t] - load[t] - p_export[t] - p_ch[t] == 0 for t in T),
+                name="balance"
+            )
+        else:
+            self.con["balance"] = m.addConstrs(
+                (pv[t] + p_import[t] - load[t] - p_export[t] == 0 for t in T),
+                name="balance"
+            )
+
+        # 3.2 Explicit bounds on flexible load (declared as constraints to expose duals)
+        self.con["load_min"] = m.addConstrs((load[t] >= d.load_min_kWh for t in T), name="load_min")
+        self.con["load_max"] = m.addConstrs((load[t] <= d.load_max_kWh for t in T), name="load_max")
+
+        # 3.3 Maximum available PV generation bound
+        self.con["pv_max"] = m.addConstrs((pv[t] <= d.pv_available[t] for t in T), name="pv_max")
+
+        # 3.4 Minimum daily energy requirement (Questions 3.a - 3.g)
+        if d.min_daily_energy_kWh is not None:
+            self.con["min_daily_energy"] = m.addConstr(
+                gp.quicksum(load[t] for t in T) >= d.min_daily_energy_kWh,
+                name="min_daily_energy"
+            )
+
+        # 3.5 Battery dynamics and terminal condition (Question 3.g)
+        if has_battery:
+            eta_ch = d.battery_charging_efficiency
+            eta_dis = d.battery_discharging_efficiency
+            soc_0 = d.battery_initial_soc_kWh
+
+            # Intertemporal state-of-charge continuity
+            for t in T:
+                soc_prev = soc_0 if t == 0 else soc[t - 1]
+                self.con[f"soc_dyn_{t}"] = m.addConstr(
+                    soc[t] == soc_prev + eta_ch * p_ch[t] - (1.0 / eta_dis) * p_dis[t],
+                    name=f"soc_dyn_{t}"
+                )
+
+            # Terminal state-of-charge constraint ensuring daily sustainability: SoC_24 >= SoC_0
+            self.con["soc_terminal"] = m.addConstr(
+                soc[len(T) - 1] >= soc_0,
+                name="soc_terminal"
+            )
+
+        m.update()
+        return self
+    def solve(self) -> Results:
+            """Optimise and return primal values, objective and dual values."""
+            m = self.m
+            m.update()
+            if m.NumConstrs == 0 and m.NumQConstrs == 0:
+                raise NotImplementedError(
+                    "The model has no constraints: complete FlexibleConsumerModel.build() in src/model.py first."
+                )
+            m.optimize()
+            status = _status_name(m.Status)
+            if m.Status != GRB.OPTIMAL:
+                raise RuntimeError(f"Optimisation ended with status {status}. Check the model (m.computeIIS() helps for infeasibility).")
+            return self._extract_results(status)
+    
+        # --------------------------------------------------------------- extraction
+    def _extract_results(self, status: str) -> Results:
+            d, T = self.data, list(self.T)
+            hourly = pd.DataFrame(index=pd.Index(T, name="hour"))
+            hourly["price"] = d.energy_price
+            hourly["pv_available"] = d.pv_available
+            if d.reference_load is not None:
+                hourly["reference_load"] = d.reference_load
+    
+            # Primal values: every hourly variable family in self.var becomes a column
+            for name, v in self.var.items():
+                if isinstance(v, gp.tupledict):
+                    hourly[name] = [v[t].X for t in T]
+            scalars = {name: v.X for name, v in self.var.items() if isinstance(v, gp.Var)}
+    
+            # Dual values: every constraint family in self.con becomes a 'dual_<name>' column or scalar
+            duals: dict[str, float] = {}
+            for name, c in self.con.items():
+                try:
+                    if isinstance(c, gp.tupledict):
+                        hourly[f"dual_{name}"] = [_dual(c[t]) for t in T]
+                    else:
+                        duals[name] = _dual(c)
+                except (AttributeError, gp.GurobiError):
+                    # No duals available (e.g. model with integer variables)
+                    pass
+    
+            return Results(
+                question=d.question,
+                status=status,
+                objective=self.m.ObjVal,
+                hourly=hourly,
+                duals=duals,
+                meta={"scalar_variables": scalars},
+            )
